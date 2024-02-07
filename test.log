@@ -1,0 +1,22 @@
+The error message you're encountering indicates that your antivirus software has flagged the compiled executable (tailf.exe) as potentially unwanted or malicious. Some antivirus programs may mistakenly identify certain files as threats.
+
+Here are a few steps you can try to address this issue:
+
+    Verify the Code:
+        Make sure that the Go code you are running is safe and does not contain any malicious code. Ensure that the code is from a reliable source.
+
+    Exclude the Folder from Antivirus Scans:
+        Exclude the folder containing your Go executable from the antivirus scans. This might prevent the antivirus software from flagging the file.
+
+    Submit a False Positive Report:
+        If you believe that the detection is a false positive, you can report it to your antivirus provider. Most antivirus vendors have a process for submitting false positive reports. Check your antivirus provider's website for instructions on how to report false positives.
+
+    Compile the Code Again:
+        Try recompiling your Go code. It's possible that the initial compilation triggered a false positive. Recompiling may create a new executable that is not flagged by the antivirus software.
+
+    Temporarily Disable Antivirus:
+        Temporarily disable your antivirus software (if possible) and then run the Go executable. Be cautious when doing this, and only disable the antivirus temporarily to test whether it's causing the issue.
+
+Remember to exercise caution when handling antivirus-related issues, and make sure you're following the guidelines provided by your antivirus software. If the problem persists, consider reaching out to the support or community forums of your antivirus provider for assistance.
+
+fgdfgdfg
