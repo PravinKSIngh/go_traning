@@ -3,12 +3,168 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"html/template"
 	"log"
+	"net/http"
 	"os"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const chunkSize = 1024
+
+var (
+	filePath = "test.log" // Replace with the path to your log file
+	mutex    sync.Mutex
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+)
+
+type Client struct {
+	conn         *websocket.Conn
+	updateTicker *time.Ticker
+}
+
+var clients = make(map[*Client]struct{})
+var clientsMutex sync.Mutex
+
+func handleTail(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl, err := template.New("tail").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Log Tail</title>
+</head>
+<body>
+    <pre id="log"></pre>
+    <script>
+        var logElement = document.getElementById("log");
+
+        function updateLog(line) {
+            logElement.innerHTML += line + "<br>";
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        var socket = new WebSocket("ws://localhost:8080/ws");
+
+        socket.onmessage = function(event) {
+            updateLog(event.data);
+        };
+
+        socket.onclose = function(event) {
+            console.error("WebSocket closed unexpectedly:", event);
+            setTimeout(function() {
+                socket = new WebSocket("ws://localhost:8080/ws");
+                socket.onmessage = function(event) {
+                    updateLog(event.data);
+                };
+                socket.onclose = socket.onclose;
+            }, 1000);
+        };
+    </script>
+</body>
+</html>
+`)
+
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	tmpl.Execute(w, nil)
+
+	// Create a new client
+	client := &Client{
+		conn:         nil, // Set to actual connection when WebSocket is established
+		updateTicker: time.NewTicker(1 * time.Second),
+	}
+
+	// Register the client
+	clientsMutex.Lock()
+	clients[client] = struct{}{}
+	clientsMutex.Unlock()
+
+	// Flush the response to initiate a connection to the client
+	flusher.Flush()
+
+	// Listen for updates and send them to the client
+	for {
+		select {
+		case <-client.updateTicker.C:
+			// Ping the client to check if the connection is still alive
+			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				// Client disconnected
+				clientsMutex.Lock()
+				delete(clients, client)
+				clientsMutex.Unlock()
+				return
+			}
+		case <-r.Context().Done():
+			// Client disconnected
+			clientsMutex.Lock()
+			delete(clients, client)
+			clientsMutex.Unlock()
+			return
+		}
+	}
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// Create a new client
+	client := &Client{
+		conn:         conn,
+		updateTicker: time.NewTicker(1 * time.Second),
+	}
+
+	// Register the client
+	clientsMutex.Lock()
+	clients[client] = struct{}{}
+	clientsMutex.Unlock()
+
+	// Associate the connection with the client
+	client.conn = conn
+
+	// Continuously send updates to the client
+	for {
+		select {
+		case <-client.updateTicker.C:
+			// Ping the client to check if the connection is still alive
+			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				// Client disconnected
+				clientsMutex.Lock()
+				delete(clients, client)
+				clientsMutex.Unlock()
+				return
+			}
+		case <-r.Context().Done():
+			// Client disconnected
+			clientsMutex.Lock()
+			delete(clients, client)
+			clientsMutex.Unlock()
+			return
+		}
+	}
+}
 
 func getLastNLines(filePath string, n int) (string, error) {
 	file, err := os.Open(filePath)
@@ -98,24 +254,48 @@ func tailFile(filePath string) {
 				time.Sleep(time.Second)
 				continue
 			}
-			fmt.Print(string(data))
+			// Update all connected clients with the new line
+			clientsMutex.Lock()
+			for client := range clients {
+				err := client.conn.WriteMessage(websocket.TextMessage, data)
+				if err != nil {
+					// Client disconnected
+					client.updateTicker.Stop()
+					delete(clients, client)
+				}
+			}
+			clientsMutex.Unlock()
 			offset = newInfo.Size()
 		}
 		time.Sleep(time.Second)
 	}
 }
 
-func main() {
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run tailf.go [filepath]")
-		os.Exit(0)
-	}
-
-	filePath := os.Args[1]
+func tFile() {
 	lines, err := getLastNLines(filePath, 4)
 	if err != nil {
 		fmt.Print("Error reading file:", err)
 	}
-	fmt.Println(lines)
+	// Update all connected clients with the new line
+	clientsMutex.Lock()
+	for client := range clients {
+		err := client.conn.WriteMessage(websocket.TextMessage, []byte(lines))
+		if err != nil {
+			// Client disconnected
+			client.updateTicker.Stop()
+			delete(clients, client)
+		}
+	}
+	clientsMutex.Unlock()
 	tailFile(filePath)
+}
+
+func main() {
+	go tFile()
+
+	http.HandleFunc("/tail", handleTail)
+	http.HandleFunc("/ws", handleWebSocket)
+
+	log.Println("Server listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
