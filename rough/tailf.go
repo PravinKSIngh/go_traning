@@ -43,45 +43,11 @@ func handleTail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl, err := template.New("tail").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Log Tail</title>
-</head>
-<body>
-    <pre id="log"></pre>
-    <script>
-        var logElement = document.getElementById("log");
-
-        function updateLog(line) {
-            logElement.innerHTML += line + "<br>";
-            logElement.scrollTop = logElement.scrollHeight;
-        }
-
-        var socket = new WebSocket("ws://localhost:8080/ws");
-
-        socket.onmessage = function(event) {
-            updateLog(event.data);
-        };
-
-        socket.onclose = function(event) {
-            console.error("WebSocket closed unexpectedly:", event);
-            setTimeout(function() {
-                socket = new WebSocket("ws://localhost:8080/ws");
-                socket.onmessage = function(event) {
-                    updateLog(event.data);
-                };
-                socket.onclose = socket.onclose;
-            }, 1000);
-        };
-    </script>
-</body>
-</html>
-`)
+	tmpl, err := template.ParseFiles("./rough/template/index.html")
 
 	if err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error - Template", http.StatusInternalServerError)
+		fmt.Println(err)
 		return
 	}
 
@@ -290,11 +256,15 @@ func tFile() {
 	tailFile(filePath)
 }
 
+func setupRoutes() {
+	http.HandleFunc("/tail", handleTail)
+	http.HandleFunc("/ws", handleWebSocket)
+}
+
 func main() {
 	go tFile()
 
-	http.HandleFunc("/tail", handleTail)
-	http.HandleFunc("/ws", handleWebSocket)
+	setupRoutes()
 
 	log.Println("Server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
