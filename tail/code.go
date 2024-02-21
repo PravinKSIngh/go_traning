@@ -2,9 +2,30 @@ package main
 
 import (
 	"fmt"
+	"html/template"
 	"log"
+	"net/http"
 	"os"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+var (
+	filePath      = "test.log" // Replace with the path to your log file
+	updateChannel = make(chan string, 100)
+	mutex         sync.Mutex
+)
+
+var (
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 )
 
 const chunkSize = 100
@@ -98,7 +119,6 @@ func getLastNLines(filePath string, n int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	return lines, nil
 }
 
@@ -130,24 +150,104 @@ func tailFile(filePath string) {
 				time.Sleep(time.Second)
 				continue
 			}
-			fmt.Print(string(data))
+
+			mutex.Lock()
+			updateChannel <- string(data)
+			mutex.Unlock()
+			//fmt.Print(string(data))
 			offset = newInfo.Size()
 		}
 		time.Sleep(time.Second)
 	}
 }
+func handleTail(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	line, _ := getLastNLines(filePath, 4)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl, err := template.New("tail").Parse(fmt.Sprintf("<!DOCTYPE html>"+
+		"	<html>"+
+		"	<head>"+
+		"		<title>Log Tail</title>"+
+		"		"+
+		"	<script type=\"application/javascript\">"+
+		"	window.onload = function () {"+
+		"		var logElement = document.getElementById(\"log\");"+
+		"	"+
+		"		function updateLog(line) {"+
+		"			logElement.innerHTML += line + \"<br>\";"+
+		"			logElement.scrollTop = logElement.scrollHeight;"+
+		"		}"+
+		"	"+
+		"		var socket = new WebSocket(\"ws://localhost:8080/ws\");"+
+		"	"+
+		"		socket.onmessage = function(event) {"+
+		"			updateLog(event.data);"+
+		"		};"+
+		"	"+
+		"		socket.onclose = function(event) {"+
+		"			console.error(\"WebSocket closed unexpectedly:\", event);"+
+		"			setTimeout(function() {"+
+		"				var newSocket = new WebSocket(\"ws://localhost:8080/ws\");"+
+		"				newSocket.onmessage = socket.onmessage;"+
+		"				newSocket.onclose = socket.onclose;"+
+		"				socket = newSocket;"+
+		"			}, 1000);"+
+		"		};"+
+		"	};"+
+		"	"+
+		"	</script>"+
+		"	</head>"+
+		"	<body>"+
+		"		<pre id=\"log\">%s</pre>"+
+		"	</body>"+
+		"	</html>", line))
+
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	tmpl.Execute(w, nil)
+
+	// Flush the response to initiate a connection to the client
+	flusher.Flush()
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer conn.Close()
+
+	go tailFile(filePath)
+	// Continuously send updates to the client
+	for {
+		select {
+		case line := <-updateChannel:
+			err := conn.WriteMessage(websocket.TextMessage, []byte(line))
+			if err != nil {
+				log.Println(err)
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run main.go file.log")
-		os.Exit(1)
-	}
 
-	filePath := os.Args[1]
-	line, err := getLastNLines(filePath, 4)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Print(line)
-	tailFile(filePath)
+	http.HandleFunc("/tail", handleTail)
+	http.HandleFunc("/ws", handleWebSocket)
+
+	log.Println("Server listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
